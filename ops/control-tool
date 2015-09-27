@@ -1,0 +1,285 @@
+#!/usr/bin/perl
+
+use POSIX qw(setsid);
+
+#my $logfile = undef;
+#my $pidfile = undef;
+#my $run_uid = undef;
+#my $run_gid = undef;
+#my $program = undef;
+#my $action = undef;
+#my @program_opts = ();
+#my $force_run = 0;
+my %conf = ();
+my @options = (
+    ['logfile', 'l', 1, \&change_conf  ],
+    ['pidfile', 'p', 1, \&change_conf  ],
+    ['config',  'c', 1, \&parse_conf   ],
+    ['workdir', 'd', 1, \&change_conf  ],
+    ['user',    'u', 1, \&change_conf  ],
+    ['force',   'f', 0, \&change_conf  ],
+    ['help',    'h', 0, \&show_help    ],
+    ['start',   '',  0, \&change_action],
+    ['stop',    '',  0, \&change_action],
+    ['status',  '',  0, \&change_action],
+    ['restart', '',  0, \&change_action],
+);
+
+main();
+
+sub parse_opt {
+    my @arg = @_;
+    my $program;
+    while (my $opt = shift(@arg)) {
+        if ($opt =~ /\-\-?(.+)$/) {
+            $opt = $1;
+            my $matched = grep {
+                if ($_->[0] eq $1 || $_->[1] eq $1) {
+                    if ($_->[2]) {
+                        my $param = shift(@arg);
+                        $param or missing_opt("\U@$_[0]");
+                        $_->[3]->($_->[0], $param);
+                    } else {
+                        $_->[3]->($_->[0], 1);
+                    }
+                }
+            } @options;
+            $matched or err_exit("unkown option $opt");
+        } elsif ($opt eq '--') {
+            $program = shift(@arg);
+            last;
+        } else {
+            $program = $opt;
+            last;
+        }
+    }
+    if ($program) {
+        $conf{program} = $program;
+        $conf{program_opts} = \@arg;
+    }
+    if ($conf{workdir}) {
+        chdir($conf{workdir}) or err_exit('chdir to ' . $conf{workdir} . " failed: $!");
+    }
+    if ($conf{user}) {
+        my @pwuser = getpwnam($conf{user});
+        @pwuser or err_exit('no such user: ' . $conf{user});
+        $conf{uid} = $pwuser[2];
+        $conf{gid} = $pwuser[3];
+    }
+    $conf{action} or missing_opt('--stop or --start or --restart or --status');
+    $conf{logfile} or $conf{logfile} = '/dev/null';
+
+    if ($conf{action} eq 'start' or $conf{action} eq 'restart') {
+        $conf{program} or missing_opt('PROGRAM');
+    }
+    if ($conf{action} eq 'stop' or $$conf{action} eq 'restart' or $conf{action} eq 'status') {
+        $conf{pidfile} or missing_opt('--pidfile');
+    }
+}
+
+sub parse_conf {
+    my $file = pop;
+    if (open(FH, $file)) {
+        while (<FH>) {
+            if (/^[\s]*#/) {
+                next;
+            }
+            my ($k, $v) = /^\s*([^\s]+)\s+(.+)\s*$/;
+            $k = (($k eq 'exec') ? 'program' : $k);
+            if (defined($k) && defined($v) && !$conf{$k}) {
+                $v =~ s/[\s]*$//g;
+                if ($k eq 'program') {
+                    my ($program, @program_opts) = split /[\s]+/, $v;
+                    $conf{program} = $program;
+                    $conf{program_opts} = \@program_opts;
+                } else {
+                    $conf{$k} = $v;
+                }
+            }
+        }
+        close FH;
+    } else {
+        err_exit("open config $file failed: $!");
+    }
+    return 1;
+}
+
+sub change_action {
+    my ($opt) = @_;
+    $conf{action} = $opt;
+}
+
+sub change_conf {
+    my ($opt, $param) = @_;
+    $conf{$opt} = $param;
+    return 1;
+}
+
+sub missing_opt {
+    print STDERR "missing option @_\n";
+    exit 1;
+}
+
+sub err_exit {
+    print STDERR "@_\n";
+    exit 1;
+}
+
+sub check_pidfile {
+    return check_pid(get_pid(@_));
+}
+
+sub check_pid {
+    my ($pid) = @_;
+    if (defined($pid)) {
+        my $process_exists = kill 0, $pid;
+        return $process_exists;
+    }
+    return 0;
+}
+
+sub get_pid {
+    my ($file) = @_;
+    my $pid = undef;
+    if (open(FH, $file)) {
+        $pid = <FH>;
+        close FH;
+    }
+    return $pid;
+}
+
+sub status {
+    my $process_exists = check_pidfile($conf{pidfile});
+    if ($process_exists) {
+        print "Program is running\n";
+        return 1;
+    }
+    print "Program is not running\n";
+    return 0;
+}
+
+sub start {
+    if (!$conf{force} && check_pidfile($conf{pidfile})) {
+        print "Program is already running, skip start\n";
+        return 1;
+    }
+
+    su($conf{program});
+
+    if (fork() == 0) { # son
+        close STDIN;
+        close STDOUT;
+        close STDERR;
+        open STDIN, '/dev/null';
+        open STDOUT, '>>', $conf{logfile};
+        open STDERR, '>>', $conf{logfile};
+        POSIX::setsid();
+        if (fork() == 0) { # grandson
+            if (defined($conf{pidfile})) {
+                if (open(FH, '>', $conf{pidfile})) {
+                    print FH $$;
+                    close FH;
+                } else {
+                    exit 1;
+                }
+            }
+            exec($conf{program}, @{$conf{program_opts}});
+            exit 1;
+        } else { # son
+            exit 0;
+        }
+    } else { # father
+        if (defined($conf{pidfile})) { # with --pidfile, we can check whether process is running
+            select(undef, undef, undef, 0.1); # sleep 100 ms
+            if (!check_pidfile($conf{pidfile})) {
+                print STDERR "run program failed\n";
+                return 0;
+            }
+            return 1;
+        } else { # without --pidfile option, we don't know whether program is running
+            return 1;
+        }
+    }
+}
+
+sub restart {
+    return (stop() && start());
+}
+
+sub stop {
+    my $file = $conf{pidfile};
+    my $pid = get_pid($file);
+    if (!check_pid($pid)) {
+        print "Program is not running, skip stop\n";
+        return 1;
+    }
+    kill 15, $pid;
+    if (!check_pid($pid)) {
+        unlink($file);
+        return 1;
+    }
+    select(undef, undef, undef, 0.1); # sleep 100 ms
+    if (!check_pid($pid)) {
+        unlink($file);
+        return 1;
+    }
+    kill 9, $pid;
+    select(undef, undef, undef, 0.1); # sleep 100 ms
+    if (!check_pid($pid)) {
+        unlink($file);
+        return 1;
+    }
+    return 0;
+}
+
+sub get_program_path {
+    my ($program) = @_;
+    my @ret = grep { -e "$_/$program" } split(':', '.:' . $ENV{PATH});
+    shift @ret;
+}
+
+sub su {
+    my ($program) = @_;
+    if (defined($conf{uid})) {
+        $) = $conf{gid};
+        $> = $conf{uid};
+    } else {
+        my $realfile = get_program_path($conf{program});
+        if (!$realfile) {
+            return;
+        }
+        my @stats = stat $realfile;
+        $) = $stats[5]; # set egid
+        $> = $stats[4]; # set euid
+    }
+    ($(, $<) = ($), $>); # set gid, uid
+}
+
+sub main {
+    parse_opt(@ARGV);
+    exit ($conf{action}->() ? 0 : 1);
+}
+
+sub show_help {
+    print STDERR "Run program as daemon.\n";
+    print STDERR "Usage: $0 [OPTIONS] <PROGRAM> [PROGRAM_OPTIONS]\n\n";
+    print STDERR "Common options:\n";
+    print STDERR "  -h,   --help                show this help\n";
+    print STDERR "  -c,   --config              use this config\n\n";
+    print STDERR "Control options:\n";
+    print STDERR "  -p,   --pidfile  FILE       write(read) program's pid to(from) FILE\n";
+    print STDERR "                              you should specify --pidfile with option --stop, --restart and --status\n";
+    print STDERR "Start:\n";
+    print STDERR "  --start                     start run program as daemon\n";
+    print STDERR "  -l,   --logfile  FILE       program write output to this FILE\n";
+    print STDERR "  -u,   --user     USER       run program as specify USER (ignored when $0 is not running as root)\n";
+    print STDERR "Stop:\n";
+    print STDERR "  --stop                      terminate program\n";
+    print STDERR "Restart:\n";
+    print STDERR "  --restart                   restart program\n";
+    print STDERR "Status:\n";
+    print STDERR "  --status                    show program status\n\n";
+    print STDERR "Mail bug reports and suggestions to <cy\@remrain.com>.\n";
+    exit 0;
+}
+

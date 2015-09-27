@@ -126,6 +126,10 @@ var page = require('webpage').create();
 page.settings.resourceTimeout = 15000;
 page.settings.userAgent = userAgent;
 page.settings.webSecurityEnabled = false;
+page.viewportSize = {
+    width: 1280,
+    height: 800
+};
 
 function quit(code) {
     if (outputImage) {
@@ -150,7 +154,9 @@ function quit(code) {
     }
 
     if (success && successUrl) {
+        console.log('Start curl success url');
         curl(successUrl, function() {
+            console.log('End curl success url');
             nPage--;
             if (!nPage) {
                 phantom.exit(code);
@@ -159,7 +165,9 @@ function quit(code) {
     }
 
     if (timeoutUrl && code == 3) {
+        console.log('Start curl timeout url');
         curl(timeoutUrl, function() {
+            console.log('End curl timeout url');
             nPage--;
             if (!nPage) {
                 phantom.exit(code);
@@ -168,7 +176,9 @@ function quit(code) {
     }
 
     if (cookieUrl) {
+        console.log('Start curl setCookie url');
         postCookie(cookieUrl, function() {
+            console.log('End curl setCookie url');
             nPage--;
             if (!nPage) {
                 phantom.exit(code);

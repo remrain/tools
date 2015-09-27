@@ -1,0 +1,12 @@
+# control_tool will change dir to this work dir
+workdir     /usr/var
+
+pidfile     run/sleep.pid
+
+# redirect program's stdout, stderr to logfile
+logfile     log/sleep.log
+
+# how to start program
+exec        sleep 300
+
+user        nobody
